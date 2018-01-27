@@ -323,6 +323,13 @@ class BaseOpenStackCharm(object, metaclass=BaseOpenStackCharmMeta):
 
     package_codenames = {}
 
+    # a dict of meta tuples of the following format to render templates
+    # from strings based on adapter properties (resolved at runtime):
+    # {config_file_path: (relation_name, adapter property)}
+    # relation names should be normalized (lowercase, underscores instead of
+    # dashes; use "options" relation name for a config adapter
+    string_templates = {}
+
     @property
     def singleton(self):
         """Return the only instance of the charm class in this run"""
@@ -703,19 +710,55 @@ class BaseOpenStackCharmActions(object):
         render_with_interfaces() which constructs a new adapters_instance
         anyway.
 
+        Configs may not only be loaded via OpenStack loaders but also via
+        string templates passed via config options or from relation data.
+        This must be explicitly declared via string_templates dict of a given
+        derived charm class by using a relation name that identifies a relation
+        adapter or config option adapter and a property to be used from that
+        adapter instance.
+
         :param configs: list of strings, the names of the configuration files.
         :param adapters_instance: [optional] the adapters_instance to use.
         """
         if adapters_instance is None:
             adapters_instance = self.adapters_instance
+
+        def get_str_tmpl(conf, adapters_instance):
+            """
+            Find out if a charm class provides meta information about whether
+            this is a template to be fetched from a string dynamically or not.
+            """
+            config_template = None
+            tmpl_meta = self.string_templates.get(conf)
+            if tmpl_meta:
+                # meta information exists but not clear if an attribute has
+                # been set yet either via config option or via relation data
+                config_template = False
+                rel_name, property = tmpl_meta
+                if hasattr(adapters_instance, rel_name):
+                    conf_tmpl_adapter = getattr(adapters_instance, rel_name)
+                    if hasattr(conf_tmpl_adapter, property):
+                        config_template = getattr(conf_tmpl_adapter, property)
+                    else:
+                        raise Exception('{} does not contain {} property'
+                                        ''.format(conf_tmpl_adapter, property))
+            return config_template
+
         with self.restart_on_change():
             for conf in configs:
+                # check if we need to load a template from a string
+                config_template = get_str_tmpl(conf, adapters_instance)
+                if config_template is False:
+                    # got a string template but it was not provided which
+                    # means we need to skip this config to avoid rendering
+                    return
+
                 charmhelpers.core.templating.render(
                     source=os.path.basename(conf),
                     template_loader=os_templating.get_loader(
                         'templates/', self.release),
                     target=conf,
-                    context=adapters_instance)
+                    context=adapters_instance, config_template=config_template)
 
     def render_with_interfaces(self, interfaces, configs=None):
         """Render the configs using the interfaces passed; overrides any
